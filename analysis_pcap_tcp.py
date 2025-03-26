@@ -20,6 +20,11 @@ timestamps = {} #[timestamp, total_packet_length]
 scale = 0
 throughput = 0
 
+packetCount = 0
+packet_ACK_handler = {}
+
+packet_retransmit = {}
+
 for ts, buf in pcap:
     eth = dpkt.ethernet.Ethernet(buf)
     ip = eth.data
@@ -85,15 +90,69 @@ for ts, buf in pcap:
         lastPacket = False
         temp = 0
 
+    #Calculate congestion window
+    # Check if ACK is sent by sender
+    if tcp.flags & dpkt.tcp.TH_ACK and socket.inet_ntoa(ip.src) == senderIP:
+        # dict[dict[arr[rtt of packet, # of packets sent (congestion window), continue, times retransmitted]]] => for every sequence number check rtt and packets sent
+        if tcp.sport not in packet_ACK_handler and len(tcp.data) != 0:
+            packet_ACK_handler[tcp.sport] = {}
+            # Track retransmits and 3 Dup ACKs [retransmit, triple ACK]
+            packet_retransmit[tcp.sport] = [0, 0]
+
+        # Check if packets are already iterated through
+        if tcp.sport in packet_ACK_handler and (len(tcp.data) + tcp.seq) in packet_ACK_handler[tcp.sport]:
+            packet_retransmit[tcp.sport][0] += 1
+        
+        if len(tcp.data) != 0 and (tcp.seq + len(tcp.data)) not in packet_ACK_handler[tcp.sport]:
+            packet_ACK_handler[tcp.sport][tcp.seq + len(tcp.data)] = [ts, 0, True, -1, 0] #Receiver will send ACK with seq+len
+    
+    # Increment count for each packet sent after initial from sender
+    if tcp.flags & dpkt.tcp.TH_ACK and tcp.sport in packet_ACK_handler:
+        for ackNum in list(packet_ACK_handler[tcp.sport].keys()):
+            if packet_ACK_handler[tcp.sport][ackNum][2] == True:
+                packet_ACK_handler[tcp.sport][ackNum][1] += 1
+
+    # Check for ACKs sent by Receiver
+    # ACK# should be the seq#
+    if tcp.flags & dpkt.tcp.TH_ACK and tcp.dport in packet_ACK_handler:
+        # Get rtt of packet
+        if tcp.ack in packet_ACK_handler[tcp.dport] and packet_ACK_handler[tcp.dport][tcp.ack][2] == True:
+            rtt = ts - packet_ACK_handler[tcp.dport][tcp.ack][0]
+            packet_ACK_handler[tcp.dport][tcp.ack][3] = rtt
+            # packet_ACK_handler[tcp.dport][tcp.ack][1] += 1
+            packet_ACK_handler[tcp.dport][tcp.ack][2] = False #Don't continue adding packets to counter
+
+        if tcp.ack in packet_ACK_handler[tcp.dport]:
+            packet_ACK_handler[tcp.dport][tcp.ack][4] += 1
+            # Retransmitted 3 times
+            if packet_ACK_handler[tcp.dport][tcp.ack][4] == 3:
+                packet_retransmit[tcp.dport][1] += 1
 
 
-# Print Part A
+
+
+print(f"Total Flows: {len(flows)}")
+print()
+
 for i in range(len(flows)):
     portNum = flows[i][0]
-    print(f"Flow {i+1} Information: {flows[i]}")
+    print(f"Flow {i+1} Information (Sender Port, IP, Receiver Port, IP): {flows[i]}")
     print(f"Transaction 1: Seq#: {transactions.get(portNum)[0][0]} ACK: {transactions.get(portNum)[0][1]} Receive Window Size: {transactions.get(portNum)[0][2]}")
     print(f"Transaction 2: Seq#: {transactions.get(portNum)[1][0]} ACK: {transactions.get(portNum)[1][1]} Receive Window Size: {transactions.get(portNum)[1][2]}")
     print(f"Throughput: {timestamps[portNum][2]} Total Data: {timestamps[portNum][1]} Time Period: {timestamps[portNum][3]}")
-    print()
+    i = 0
+    for ack in packet_ACK_handler[portNum]:
+        if i < 1:
+            print(f"RTT: {packet_ACK_handler[portNum][ack][3]}")
+            print(f"First 3 Congestion Window Sizes: ", end="")
+        
+        if i < 3:
+            print(f"{packet_ACK_handler[portNum][ack][1]}, ", end="")
 
+        i += 1
+    print()
+    print(f"Number of Total Retransmissions: {packet_retransmit[portNum][0]}")
+    print(f"Number of Triple ACKs: {packet_retransmit[portNum][1]}")
+    print(f"Number of Timeouts: {packet_retransmit[portNum][0] - packet_retransmit[portNum][1]}")
+    print()
     
